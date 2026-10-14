@@ -35,7 +35,8 @@ class XOAuth2TokenManager  {
 public:
     XOAuth2TokenManager();
     ~XOAuth2TokenManager();
-    XOAuth2Parts partsForAccount(shared_ptr<Account> account);
+    // scope: Microsoft only; empty requests the IMAP/SMTP token, see MakeOAuthRefreshRequest.
+    XOAuth2Parts partsForAccount(shared_ptr<Account> account, string scope = "");
 };
 
 

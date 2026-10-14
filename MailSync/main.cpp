@@ -359,6 +359,20 @@ int runTestAuth(shared_ptr<Account> account, string & errorService) {
         goto done;
     }
 
+    if (SendsViaGraph(account)) {
+        // Office 365 sends via Microsoft Graph (SMTP AUTH is often disabled), so prove a Mail.Send token instead.
+        alogger.log("\n\n----------Microsoft Graph----------\n");
+        errorService = "smtp";
+        try {
+            SharedXOAuth2TokenManager()->partsForAccount(account, "https://graph.microsoft.com/Mail.Send");
+            alogger.log("Mail.Send token OK; mail will be sent via Microsoft Graph.\n");
+        } catch (SyncException & ex) {
+            alogger.log("Could not get a Microsoft Graph Mail.Send token: " + ex.toJSON().dump() + "\n");
+            err = ErrorAuthentication;
+        }
+        goto done;
+    }
+
     // smtp
     alogger.log("\n\n----------SMTP----------\n");
     errorService = "smtp";

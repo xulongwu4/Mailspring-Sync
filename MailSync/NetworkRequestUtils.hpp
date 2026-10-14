@@ -17,6 +17,7 @@
 #include "json.hpp"
 
 class Account;
+namespace mailcore { class Data; }
 
 using namespace nlohmann;
 using namespace std;
@@ -29,7 +30,13 @@ void CleanupCurlRequest(CURL * curl_handle);
 CURL * CreateJSONRequest(string url, string method = "GET", string authorization = "", const char * payloadChars = nullptr);
 CURL * CreateCalDavRequest(string url, string method = "GET", const char * payloadChars = nullptr);
 
-const json MakeOAuthRefreshRequest(string provider, string clientId, string refreshToken);
+const json MakeOAuthRefreshRequest(string provider, string clientId, string refreshToken, string scope = "");
+
+// Office 365 send via Microsoft Graph /me/sendMail, for tenants with SMTP AUTH disabled.
+// Shared mailboxes (SMTP user != IMAP user) keep SMTP: /me/sendMail sends as the signed-in user.
+bool SendsViaGraph(shared_ptr<Account> account);
+// Throws SyncException("send-failed", ...) on any failure.
+void GraphSendMIME(shared_ptr<Account> account, mailcore::Data * mime);
 
 const string PerformRequest(CURL * curl_handle);
 const json PerformJSONRequest(CURL * curl_handle);

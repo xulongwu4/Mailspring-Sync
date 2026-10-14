@@ -87,8 +87,8 @@ XOAuth2TokenManager::~XOAuth2TokenManager() {
 
 
 
-XOAuth2Parts XOAuth2TokenManager::partsForAccount(shared_ptr<Account> account) {
-    string key = account->id();
+XOAuth2Parts XOAuth2TokenManager::partsForAccount(shared_ptr<Account> account, string scope) {
+    string key = account->id() + scope;
     
     // There's not much of a point to having two threads request the same token at once.
     // Only allow one thread to access / update the cache and make others wait until it
@@ -109,7 +109,7 @@ XOAuth2Parts XOAuth2TokenManager::partsForAccount(shared_ptr<Account> account) {
     }
 
     spdlog::get("logger")->info("Fetching XOAuth2 access token ({}) for {}", account->provider(), account->id());
-    json updated = MakeOAuthRefreshRequest(account->provider(), refreshClientId, account->refreshToken());
+    json updated = MakeOAuthRefreshRequest(account->provider(), refreshClientId, account->refreshToken(), scope);
 
     // A 2xx does not mean the body is a token response: a captive portal or intercepting
     // proxy answers 200 with its own sign-in page, which PerformJSONRequest returns as

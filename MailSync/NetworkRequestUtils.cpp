@@ -56,7 +56,7 @@ size_t _onAppendToString(void *contents, size_t length, size_t nmemb, void *user
     return real_size;
 }
 
-const json MakeOAuthRefreshRequest(string provider, string clientId, string refreshToken) {
+const json MakeOAuthRefreshRequest(string provider, string clientId, string refreshToken, string scope) {
     CURL * curl_handle = curl_easy_init();
     const char * url =
           provider == "gmail" ? "https://www.googleapis.com/oauth2/v4/token"
@@ -76,7 +76,12 @@ const json MakeOAuthRefreshRequest(string provider, string clientId, string refr
         // workaround the fact that Microsoft's OAUTH flow allows you to authorize many scopes, but you
         // have to get a separate token for outlook (email + IMAP) and contacts / calendar / Microsoft Graph APIs
         // separately. The same refresh token will give you access tokens, but the access tokens are different.
-        payload += "&scope=https%3A%2F%2Foutlook.office.com%2FIMAP.AccessAsUser.All%20https%3A%2F%2Foutlook.office.com%2FSMTP.Send";
+        if (scope == "") {
+            scope = "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send";
+        }
+        char * s = curl_easy_escape(curl_handle, scope.c_str(), 0);
+        payload += "&scope=" + string(s);
+        curl_free(s);
     }
 
     string gmailClientId = MailUtils::getEnvUTF8("GMAIL_CLIENT_ID");
@@ -124,6 +129,36 @@ CURL * CreateJSONRequest(string url, string method, string authorization, const 
     curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
 
     return curl_handle;
+}
+
+bool SendsViaGraph(shared_ptr<Account> account) {
+    return account->provider() == "office365" &&
+        (account->SMTPUsername() == "" || account->SMTPUsername() == account->IMAPUsername());
+}
+
+void GraphSendMIME(shared_ptr<Account> account, mailcore::Data * mime) {
+    // shortcut: Graph caps a request at 4MB (~3MB of MIME after base64), larger sends fail with 413;
+    // upgrade to draft + attachment upload session if that matters.
+    string payload = mime->base64String()->UTF8Characters();
+    CURL * curl_handle = nullptr;
+    try {
+        auto parts = SharedXOAuth2TokenManager()->partsForAccount(account, "https://graph.microsoft.com/Mail.Send");
+        curl_handle = curl_easy_init();
+        CurlRequestData *requestData = new CurlRequestData();
+        requestData->headers = curl_slist_append(requestData->headers, ("Authorization: Bearer " + parts.accessToken).c_str());
+        requestData->headers = curl_slist_append(requestData->headers, "Content-Type: text/plain");
+        curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
+        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://graph.microsoft.com/v1.0/me/sendMail");
+        curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20);
+        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, (long)payload.size());
+        PerformRequest(curl_handle); // 202 on success; >= 300 throws
+        CleanupCurlRequest(curl_handle);
+    } catch (SyncException & ex) {
+        CleanupCurlRequest(curl_handle);
+        throw SyncException("send-failed", "Microsoft Graph sendMail: " + ex.key + " " + ex.debuginfo, false);
+    }
 }
 
 const string PerformRequest(CURL * curl_handle) {

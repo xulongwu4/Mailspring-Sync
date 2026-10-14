@@ -2229,7 +2229,16 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
 
     SMTPSession smtp;
     SMTPProgress sprogress;
-    MailUtils::configureSessionForAccount(smtp, account);
+    bool viaGraph = SendsViaGraph(account);
+    if (viaGraph && multisend) {
+        // shortcut: Graph sendMail takes recipients from the MIME headers, so per-recipient
+        // (tracking) bodies can't be delivered; everyone gets the "self" body, untracked.
+        logger->warn("-- Sending via Microsoft Graph: per-recipient bodies not supported, sending one body to all.");
+        multisend = false;
+    }
+    if (!viaGraph) {
+        MailUtils::configureSessionForAccount(smtp, account);
+    }
     string succeeded;
 
     if (multisend) {
@@ -2256,8 +2265,12 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
         }
 
     } else {
-        logger->info("-- Sending a single message body to all recipients:");
-        smtp.sendMessage(messageDataForSent, &sprogress, &err);
+        logger->info("-- Sending a single message body to all recipients{}:", viaGraph ? " via Microsoft Graph" : "");
+        if (viaGraph) {
+            GraphSendMIME(account, messageDataForSent);
+        } else {
+            smtp.sendMessage(messageDataForSent, &sprogress, &err);
+        }
     }
     
     if (err != ErrorNone) {
@@ -3148,12 +3161,17 @@ void TaskProcessor::performRemoteSendRSVP(Task * task) {
     // Send the RSVP via SMTP
     // =========================================================================
 
+    logger->info("-- Sending RFC 6047-compliant {} to organizer {}",
+                 method == "REPLY" ? method + " (" + icsRSVPStatus + ")" : method, organizer);
+    if (SendsViaGraph(account)) {
+        GraphSendMIME(account, messageData);
+        logger->info("-- {} sent successfully via Microsoft Graph", method);
+        return;
+    }
+
     SMTPSession smtp;
     SMTPProgress sprogress;
     MailUtils::configureSessionForAccount(smtp, account);
-
-    logger->info("-- Sending RFC 6047-compliant {} to organizer {}",
-                 method == "REPLY" ? method + " (" + icsRSVPStatus + ")" : method, organizer);
     smtp.sendMessage(messageData, &sprogress, &err);
 
     if (err != ErrorNone) {
