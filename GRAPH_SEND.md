@@ -31,6 +31,13 @@ Only mailsync (the C++ sync engine) changes. The Electron app is untouched.
   `Content-Type: text/plain`. Graph takes the recipients (To/Cc/Bcc) from the MIME headers and
   returns 202. Graph saves the copy in Sent Items; the existing Sent-folder scan by Message-ID
   finds it like it finds a server-filed SMTP copy.
+- **Large messages** (MIME >= 3 MB, `GraphSendMessage`): the MIME is rebuilt without file
+  attachments and posted to `POST /me/messages` (creates a draft). Each attachment is added with
+  `POST .../attachments` (< 3 MB) or an upload session (`createUploadSession`, then `PUT` ranges of
+  3.75 MB to the pre-authenticated URL, no Authorization header). Then `POST .../send`. On any
+  failure the draft is deleted. Inline images stay in the MIME, so body + inline images must be < 3 MB.
+  Needs `Mail.ReadWrite` consent (`graph_consent_test.py --large`); the token is requested with
+  `Mail.ReadWrite Mail.Send` only on this path, so small mail keeps working without it.
 - **Errors**: any failure (token refresh, HTTP error, network) is raised as
   `SyncException("send-failed", "Microsoft Graph sendMail: ...")`, which the app already shows as
   a send failure.
@@ -44,16 +51,17 @@ Only mailsync (the C++ sync engine) changes. The Electron app is untouched.
 |------|--------|
 | `MailSync/NetworkRequestUtils.hpp/.cpp` | `MakeOAuthRefreshRequest(..., scope = "")` (Microsoft: empty = IMAP+SMTP scopes as before); new `SendsViaGraph()`, `GraphSendMIME()` |
 | `MailSync/XOAuth2TokenManager.hpp/.cpp` | `partsForAccount(account, scope = "")`; cache key is `account id + scope` |
-| `MailSync/TaskProcessor.cpp` | `performRemoteSendDraft` and the RSVP send use Graph when `SendsViaGraph` |
+| `MailSync/TaskProcessor.cpp` | `performRemoteSendDraft` (`GraphSendMessage`) and the RSVP send (`GraphSendMIME`) use Graph when `SendsViaGraph` |
 | `MailSync/main.cpp` | `runTestAuth`: Graph token check instead of SMTP for Graph accounts |
 
 No new source files, so CMakeLists.txt / Xcode / Visual Studio projects need no change.
 
 ## Limits
 
-- **4 MB request cap**: Graph rejects larger requests (413). With base64 overhead that is about
-  3 MB of MIME, so big attachments fail. Fix: create a draft, upload attachments with an upload
-  session, then send the draft.
+- **Large messages need `Mail.ReadWrite`** consent and are untested against a live tenant.
+  Unverified: whether a draft created from MIME keeps our Message-ID. If not, the Sent-folder scan
+  misses Graph's copy and mailsync appends its own, leaving two copies in Sent Items (the log line
+  `Graph draft created (internetMessageId ...)` shows which). Graph caps attachments at 150 MB.
 - **Per-recipient bodies only for one recipient**: Graph delivers to every MIME To/Cc/Bcc
   address, with no separate envelope. With exactly one recipient, that recipient's tracked body is
   sent and the "self" body replaces the server's Sent copy, as with SMTP. With 2+ recipients
@@ -71,6 +79,7 @@ No new source files, so CMakeLists.txt / Xcode / Visual Studio projects need no 
 
 `graph_consent_test.py` (next to this file, Python stdlib only) runs the same OAuth flow as Mailspring,
 prints the granted scopes and checks for `Mail.Send`. With `--send` it sends a test mail via Graph.
+With `--large` it also requests and checks `Mail.ReadWrite` (for messages over 3 MB).
 If `Mail.Send` is missing, a tenant admin must grant consent to the Mailspring app.
 
 ## Build (Linux)

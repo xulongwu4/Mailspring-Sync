@@ -17,7 +17,7 @@
 #include "json.hpp"
 
 class Account;
-namespace mailcore { class Data; }
+namespace mailcore { class Data; class MessageBuilder; }
 
 using namespace nlohmann;
 using namespace std;
@@ -37,6 +37,8 @@ const json MakeOAuthRefreshRequest(string provider, string clientId, string refr
 bool SendsViaGraph(shared_ptr<Account> account);
 // Throws SyncException("send-failed", ...) on any failure.
 void GraphSendMIME(shared_ptr<Account> account, mailcore::Data * mime);
+// Sends builder's message; over 3 MB it goes draft + attachment uploads + send (needs Mail.ReadWrite).
+void GraphSendMessage(shared_ptr<Account> account, mailcore::MessageBuilder & builder);
 
 const string PerformRequest(CURL * curl_handle);
 const json PerformJSONRequest(CURL * curl_handle);

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Check whether your O365 tenant lets Mailspring's app ID send mail via Microsoft Graph.
 
-Usage: python3 /tmp/graph_consent_test.py [--send]
-  --send  also sends a one-line test mail to yourself through Graph /me/sendMail
+Usage: python3 graph_consent_test.py [--send] [--large]
+  --send   also sends a one-line test mail to yourself through Graph /me/sendMail
+  --large  also asks for Mail.ReadWrite, needed to send messages over 3 MB (draft + attachment upload)
 """
 import base64, hashlib, http.server, json, secrets, sys, urllib.error, urllib.parse, urllib.request, webbrowser
 
 CLIENT_ID = "8787a430-6eee-41e1-b914-681d90d35625"  # Mailspring's O365 app (onboarding-constants.ts)
 PORT = 12141
 REDIRECT = f"http://localhost:{PORT}/desktop"
-SCOPES = "openid offline_access user.read Mail.Send"
+SCOPES = "openid offline_access user.read Mail.Send" + (" Mail.ReadWrite" if "--large" in sys.argv else "")
 
 b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 verifier = b64(secrets.token_bytes(32))
@@ -55,6 +56,7 @@ claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)
 scp = claims.get("scp", "").split()
 print("Granted scopes:", " ".join(scp))
 if "Mail.Send" not in scp: sys.exit("FAIL: Mail.Send not granted")
+if "--large" in sys.argv and "Mail.ReadWrite" not in scp: sys.exit("FAIL: Mail.ReadWrite not granted")
 print("OK: Graph Mail.Send granted for", claims.get("upn") or claims.get("unique_name"))
 
 if "--send" in sys.argv:

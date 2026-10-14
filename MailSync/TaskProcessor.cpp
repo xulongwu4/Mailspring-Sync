@@ -2260,7 +2260,7 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
             Address * to = Address::addressWithMailbox(AS_MCSTR(it.key()));
             Data * messageData = builder.data();
             if (viaGraph) {
-                GraphSendMIME(account, messageData); // sole recipient, so headers == envelope
+                GraphSendMessage(account, builder); // sole recipient, so headers == envelope
             } else {
                 smtp.sendMessage(builder.header()->from(), Array::arrayWithObject(to), messageData, &sprogress, &err);
             }
@@ -2273,7 +2273,7 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
     } else {
         logger->info("-- Sending a single message body to all recipients{}:", viaGraph ? " via Microsoft Graph" : "");
         if (viaGraph) {
-            GraphSendMIME(account, messageDataForSent);
+            GraphSendMessage(account, builder);
         } else {
             smtp.sendMessage(messageDataForSent, &sprogress, &err);
         }

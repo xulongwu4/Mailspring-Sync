@@ -136,28 +136,108 @@ bool SendsViaGraph(shared_ptr<Account> account) {
         (account->SMTPUsername() == "" || account->SMTPUsername() == account->IMAPUsername());
 }
 
+static const string GRAPH_ME = "https://graph.microsoft.com/v1.0/me";
+// Graph docs: single requests for files under 3 MB, upload sessions (PUT ranges < 4 MB) above.
+static const size_t GRAPH_SINGLE_REQUEST_MAX = 3 * 1024 * 1024;
+static const size_t GRAPH_UPLOAD_CHUNK = 12 * 320 * 1024;
+
+// One Graph HTTP call. token == "" sends no Authorization (upload URLs are pre-authenticated).
+// Throws SyncException on non-2xx; the handle is cleaned up either way.
+static json graphCall(string method, string url, string token, const string & body, string contentType, string extraHeader = "") {
+    CURL * curl_handle = curl_easy_init();
+    CurlRequestData *requestData = new CurlRequestData();
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
+    if (token != "") {
+        requestData->headers = curl_slist_append(requestData->headers, ("Authorization: Bearer " + token).c_str());
+    }
+    // "Content-Type:" with no value stops curl adding its form-urlencoded default
+    requestData->headers = curl_slist_append(requestData->headers, ("Content-Type: " + contentType).c_str());
+    requestData->headers = curl_slist_append(requestData->headers, "Expect:");
+    if (extraHeader != "") {
+        requestData->headers = curl_slist_append(requestData->headers, extraHeader.c_str());
+    }
+    curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20);
+    curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
+    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, body.data());
+    curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    return PerformJSONRequest(curl_handle);
+}
+
 void GraphSendMIME(shared_ptr<Account> account, mailcore::Data * mime) {
-    // shortcut: Graph caps a request at 4MB (~3MB of MIME after base64), larger sends fail with 413;
-    // upgrade to draft + attachment upload session if that matters.
-    string payload = mime->base64String()->UTF8Characters();
-    CURL * curl_handle = nullptr;
     try {
         auto parts = SharedXOAuth2TokenManager()->partsForAccount(account, "https://graph.microsoft.com/Mail.Send");
-        curl_handle = curl_easy_init();
-        CurlRequestData *requestData = new CurlRequestData();
-        requestData->headers = curl_slist_append(requestData->headers, ("Authorization: Bearer " + parts.accessToken).c_str());
-        requestData->headers = curl_slist_append(requestData->headers, "Content-Type: text/plain");
-        curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
-        curl_easy_setopt(curl_handle, CURLOPT_URL, "https://graph.microsoft.com/v1.0/me/sendMail");
-        curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20);
-        curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload.c_str());
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, (long)payload.size());
-        PerformRequest(curl_handle); // 202 on success; >= 300 throws
-        CleanupCurlRequest(curl_handle);
+        graphCall("POST", GRAPH_ME + "/sendMail", parts.accessToken, mime->base64String()->UTF8Characters(), "text/plain"); // 202
     } catch (SyncException & ex) {
-        CleanupCurlRequest(curl_handle);
         throw SyncException("send-failed", "Microsoft Graph sendMail: " + ex.key + " " + ex.debuginfo, false);
+    }
+}
+
+void GraphSendMessage(shared_ptr<Account> account, mailcore::MessageBuilder & builder) {
+    mailcore::Data * mime = builder.data();
+    if (mime->length() < GRAPH_SINGLE_REQUEST_MAX) {
+        GraphSendMIME(account, mime);
+        return;
+    }
+
+    // Too big for one request: create a draft without the file attachments, attach each one
+    // (upload session if >= 3 MB), then send the draft. Inline images stay in the MIME.
+    mailcore::Array * files = builder.attachments();
+    mailcore::Data * bare = mime;
+    if (files != NULL && files->count() > 0) {
+        files->retain();
+        builder.setAttachments(NULL);
+        bare = builder.data();
+        builder.setAttachments(files); // stores a copy
+        files->release();
+        files = builder.attachments();
+    }
+    if (bare->length() >= GRAPH_SINGLE_REQUEST_MAX) {
+        throw SyncException("send-failed", "Microsoft Graph: message body and inline images exceed 3 MB.", false);
+    }
+
+    string token;
+    string draftUrl;
+    try {
+        token = SharedXOAuth2TokenManager()->partsForAccount(account, "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send").accessToken;
+        json draft = graphCall("POST", GRAPH_ME + "/messages", token, bare->base64String()->UTF8Characters(), "text/plain");
+        if (!draft.count("id") || !draft["id"].is_string()) {
+            throw SyncException("send-failed", "Microsoft Graph returned no draft id: " + draft.dump(), false);
+        }
+        CURL * esc = curl_easy_init();
+        char * id = curl_easy_escape(esc, draft["id"].get<string>().c_str(), 0);
+        draftUrl = GRAPH_ME + "/messages/" + id;
+        curl_free(id);
+        curl_easy_cleanup(esc);
+        spdlog::get("logger")->info("-- Graph draft created (internetMessageId {}), adding {} attachments", draft["internetMessageId"].is_string() ? draft["internetMessageId"].get<string>() : "", files->count());
+
+        for (unsigned int i = 0; i < files->count(); i++) {
+            mailcore::Attachment * a = (mailcore::Attachment *)files->objectAtIndex(i);
+            mailcore::Data * d = a->data();
+            string name = a->filename() ? a->filename()->UTF8Characters() : "attachment";
+            string type = a->mimeType() ? a->mimeType()->UTF8Characters() : "application/octet-stream";
+            size_t len = d->length();
+            if (len < GRAPH_SINGLE_REQUEST_MAX) {
+                json att = {{"@odata.type", "#microsoft.graph.fileAttachment"}, {"name", name}, {"contentType", type}, {"contentBytes", d->base64String()->UTF8Characters()}};
+                graphCall("POST", draftUrl + "/attachments", token, att.dump(), "application/json");
+                continue;
+            }
+            json req = {{"AttachmentItem", {{"attachmentType", "file"}, {"name", name}, {"size", len}, {"contentType", type}}}};
+            json session = graphCall("POST", draftUrl + "/attachments/createUploadSession", token, req.dump(), "application/json");
+            string uploadUrl = session.value("uploadUrl", "");
+            for (size_t off = 0; off < len; off += GRAPH_UPLOAD_CHUNK) {
+                size_t n = min(GRAPH_UPLOAD_CHUNK, len - off);
+                string range = "Content-Range: bytes " + to_string(off) + "-" + to_string(off + n - 1) + "/" + to_string(len);
+                graphCall("PUT", uploadUrl, "", string(d->bytes() + off, n), "application/octet-stream", range);
+            }
+        }
+        graphCall("POST", draftUrl + "/send", token, "", ""); // 202
+    } catch (SyncException & ex) {
+        if (draftUrl != "") {
+            try { graphCall("DELETE", draftUrl, token, "", ""); } catch (SyncException &) {} // don't leave a half-built draft
+        }
+        throw SyncException("send-failed", "Microsoft Graph large send (needs Mail.ReadWrite consent): " + ex.key + " " + ex.debuginfo, false);
     }
 }
 
