@@ -54,8 +54,10 @@ No new source files, so CMakeLists.txt / Xcode / Visual Studio projects need no 
 - **4 MB request cap**: Graph rejects larger requests (413). With base64 overhead that is about
   3 MB of MIME, so big attachments fail. Fix: create a draft, upload attachments with an upload
   session, then send the draft.
-- **No per-recipient bodies**: when the app asks for a multisend (link/open tracking), everyone gets
-  the "self" body, untracked; a warning is logged.
+- **Per-recipient bodies only for one recipient**: Graph delivers to every MIME To/Cc/Bcc
+  address, with no separate envelope. With exactly one recipient, that recipient's tracked body is
+  sent and the "self" body replaces the server's Sent copy, as with SMTP. With 2+ recipients
+  everyone gets the "self" body, untracked; a warning is logged.
 - **Shared mailboxes / send-as** still use SMTP and will still fail if SMTP AUTH is off.
   Fix: `POST /users/{mailbox}/sendMail` with `Mail.Send.Shared` consent.
 - **Personal Outlook.com accounts** (provider `outlook`) are not switched; they keep SMTP.

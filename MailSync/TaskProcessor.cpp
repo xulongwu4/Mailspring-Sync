@@ -2230,10 +2230,12 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
     SMTPSession smtp;
     SMTPProgress sprogress;
     bool viaGraph = SendsViaGraph(account);
-    if (viaGraph && multisend) {
-        // shortcut: Graph sendMail takes recipients from the MIME headers, so per-recipient
-        // (tracking) bodies can't be delivered; everyone gets the "self" body, untracked.
-        logger->warn("-- Sending via Microsoft Graph: per-recipient bodies not supported, sending one body to all.");
+    // Graph sendMail takes recipients from the MIME headers, so a per-recipient (tracking) body
+    // can only be delivered when that one recipient is the whole recipient list.
+    bool graphSingleRecipient = draft.to().size() + draft.cc().size() + draft.bcc().size() == 1;
+    if (viaGraph && multisend && !(graphSingleRecipient && perRecipientBodies.size() == 2)) {
+        // shortcut: with 2+ recipients everyone gets the "self" body, untracked.
+        logger->warn("-- Sending via Microsoft Graph: per-recipient bodies need a single recipient, sending one untracked body to all.");
         multisend = false;
     }
     if (!viaGraph) {
@@ -2257,7 +2259,11 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
             }
             Address * to = Address::addressWithMailbox(AS_MCSTR(it.key()));
             Data * messageData = builder.data();
-            smtp.sendMessage(builder.header()->from(), Array::arrayWithObject(to), messageData, &sprogress, &err);
+            if (viaGraph) {
+                GraphSendMIME(account, messageData); // sole recipient, so headers == envelope
+            } else {
+                smtp.sendMessage(builder.header()->from(), Array::arrayWithObject(to), messageData, &sprogress, &err);
+            }
             if (err != ErrorNone) {
                 break;
             }
